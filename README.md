@@ -30,8 +30,8 @@
 │   ├── fitting_core.py           # 拟合策略模块
 |   ├── fitting_dispatcher.py     # 拟合策略调度器，根据用户选择调用不同模型
 │   └── requirements.txt          # 项目依赖包
-│   ├── fitting_strategies/           # 拟合策略（模型）目录
-│   │   ├── base_fitting_strategy.py  # 拟合策略基类
+│   ├── fitting_strategies/           # 拟合函数目录
+│   │   ├── base_fitting_strategy.py  # 拟合函数基类（请勿删除）
 │   │   ├── biexp_strategy.py         # 双指数模型
 │   │   ├── triexp_strategy.py        # 三指数模型
 │   │   ├── erf_conv_biexp_strategy.py # 带卷积的双指数模型
