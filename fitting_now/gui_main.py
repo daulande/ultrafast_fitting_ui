@@ -16,6 +16,7 @@ import traceback
 from typing import Optional, List, Dict, Any
 import uuid # 用于生成唯一ID
 import pickle # <-- 新增导入, 用于项目保存/加载
+import subprocess # <-- 新增导入, 用于运行curve_main.py
 from gui_export_selection_dialog import ExportSelectionDialog
 
 # --- Matplotlib 中文显示设置 (已优化) ---
@@ -120,6 +121,11 @@ class ExponentialFittingGUI:
         self.root = root
         self.root.title("多指数拟合程序 (高级版)")
         self.root.geometry("1600x900")
+        
+        # 启用窗口大小调整
+        self.root.minsize(1200, 700)  # 设置最小窗口尺寸
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
 
         self.styles = setup_dark_theme(self.root)
         self.default_font = self.styles['default_font']
@@ -166,7 +172,8 @@ class ExponentialFittingGUI:
 
         self.controls_to_manage_state = []
         
-        self.visible_fit_ids = set()
+        # 将visible_fit_ids从集合改为字典，每个温度一个可见性集合
+        self.visible_fit_ids = {}
         
         self.side_panel_width = 350
 
@@ -187,6 +194,7 @@ class ExponentialFittingGUI:
         self.file_menu.add_command(label="保存项目...", command=self.save_project)
         self.file_menu.add_command(label="保存结果为文本", command=self.save_results)
         self.file_menu.add_command(label="导出曲线", command=self.export_curves)
+        self.file_menu.add_command(label="导出多Sheet格式CSV", command=self.export_multi_sheet_csv)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="退出", command=self.root.quit)
 
@@ -194,6 +202,7 @@ class ExponentialFittingGUI:
         menubar.add_cascade(label="工具", menu=self.tools_menu)
         self.debug_var = tk.BooleanVar(value=False)
         self.tools_menu.add_checkbutton(label="调试模式", variable=self.debug_var, command=self._on_debug_mode_toggle)
+        self.tools_menu.add_command(label="观察拟合曲线变换", command=self.run_curve_tool)
 
         self.help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="帮助", menu=self.help_menu)
@@ -202,17 +211,23 @@ class ExponentialFittingGUI:
 
         self.main_frame = ttk.Frame(self.root, padding="10")
         self.main_frame.grid(row=0, column=0, sticky="nsew")
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
         
-        self.main_frame.columnconfigure(0, weight=0, minsize=160)
-        self.main_frame.columnconfigure(1, weight=1)
-        self.main_frame.columnconfigure(2, weight=0)
-        self.main_frame.rowconfigure(1, weight=1)
+        # 配置主框架的行列权重，实现等比例缩放
+        self.main_frame.columnconfigure(0, weight=0, minsize=160)  # 温度列表区域
+        self.main_frame.columnconfigure(1, weight=3)  # 图表区域，给予更多空间
+        self.main_frame.columnconfigure(2, weight=0, minsize=30)  # 切换按钮区域
+        self.main_frame.rowconfigure(0, weight=0)  # 控制面板行
+        self.main_frame.rowconfigure(1, weight=1)  # 主内容区域
+        self.main_frame.rowconfigure(2, weight=0)  # 状态栏行
 
         control_frame = ttk.LabelFrame(self.main_frame, text="控制面板", padding=(10,5))
-        control_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(5,10), padx=5)
-        control_frame.columnconfigure(3, weight=1)
+        control_frame.grid(row=0, column=0, columnspan=3, sticky="nsew", pady=(5,10), padx=5)
+        
+        # 控制面板的列配置
+        control_frame.columnconfigure(0, weight=1)  # 文件区
+        control_frame.columnconfigure(1, weight=1)  # 参数区
+        control_frame.columnconfigure(2, weight=1)  # 操作区
+        control_frame.columnconfigure(3, weight=1)  # 导航区
 
         file_group = ttk.LabelFrame(control_frame, text="数据文件", padding=5)
         file_group.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="ns")
@@ -256,6 +271,10 @@ class ExponentialFittingGUI:
         self.save_results_button.grid(row=1, column=0, padx=5, pady=2, sticky='ew')
         self.export_curves_button = ttk.Button(action_group, text="导出曲线", command=self.export_curves)
         self.export_curves_button.grid(row=1, column=1, padx=5, pady=2, sticky='ew')
+        self.export_csv_button = ttk.Button(action_group, text="导出多Sheet格式CSV", command=self.export_multi_sheet_csv)
+        self.export_csv_button.grid(row=2, column=0, columnspan=2, padx=5, pady=2, sticky='ew')
+        self.curve_tool_button = ttk.Button(action_group, text="观察拟合曲线变换", command=self.run_curve_tool)
+        self.curve_tool_button.grid(row=3, column=0, columnspan=2, padx=5, pady=2, sticky='ew')
         
         nav_group = ttk.LabelFrame(control_frame, text="图形导航", padding=5)
         nav_group.grid(row=0, column=3, padx=(5,0), pady=5, sticky="nsew")
@@ -271,7 +290,8 @@ class ExponentialFittingGUI:
         
         temp_frame = ttk.LabelFrame(self.main_frame, text="温度选择", padding="10")
         temp_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-        temp_frame.rowconfigure(0, weight=1); temp_frame.columnconfigure(0, weight=1)
+        temp_frame.rowconfigure(0, weight=1)
+        temp_frame.columnconfigure(0, weight=1)
         self.temp_listbox = tk.Listbox(temp_frame, width=25, exportselection=False, relief="flat", borderwidth=0, highlightthickness=0, bg='#3c3f41', fg='#cccccc', selectbackground='#007ACC', font=self.listbox_font)
         self.temp_listbox.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(temp_frame, orient=tk.VERTICAL, command=self.temp_listbox.yview)
@@ -281,9 +301,11 @@ class ExponentialFittingGUI:
 
         self.plot_frame = ttk.LabelFrame(self.main_frame, text="数据显示与拟合", padding="10")
         self.plot_frame.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
-        self.plot_frame.rowconfigure(0, weight=1); self.plot_frame.columnconfigure(0, weight=1)
+        self.plot_frame.rowconfigure(0, weight=1)
+        self.plot_frame.columnconfigure(0, weight=1)
 
-        self.fig = Figure(figsize=(9, 7), dpi=100, facecolor=self.plot_bg_color)
+        # 使用Figure对象的tight_layout来改善绘图区域的布局
+        self.fig = Figure(figsize=(9, 7), dpi=100, facecolor=self.plot_bg_color, tight_layout=True)
         self.ax = self.fig.add_subplot(111, facecolor=self.plot_bg_color)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
         self.canvas_widget = self.canvas.get_tk_widget()
@@ -298,7 +320,8 @@ class ExponentialFittingGUI:
         self.coord_label.place(relx=1.0, rely=0.0, x=-5, y=5, anchor='ne')
 
         self.results_frame = ttk.LabelFrame(self.plot_frame, text="拟合结果列表", padding="10")
-        self.results_frame.rowconfigure(0, weight=1); self.results_frame.columnconfigure(0, weight=1)
+        self.results_frame.rowconfigure(0, weight=1)
+        self.results_frame.columnconfigure(0, weight=1)
         
         self.fit_results_tree = ttk.Treeview(
             self.results_frame, columns=('strategy', 'r_squared'), show='tree headings'
@@ -333,9 +356,11 @@ class ExponentialFittingGUI:
         self.toggle_button.grid(row=1, column=2, sticky="ns", padx=(5,0))
         
         self.status_frame = ttk.Frame(self.main_frame, padding=(5,3))
-        self.status_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(5,0))
+        self.status_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(5,0))
+        self.status_frame.columnconfigure(0, weight=1)  # 让状态标签能够自适应宽度
+        
         self.status_label = ttk.Label(self.status_frame, text="准备就绪", font=self.status_font)
-        self.status_label.pack(side=tk.LEFT, padx=5)
+        self.status_label.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.progress = ttk.Progressbar(self.status_frame, mode='indeterminate', length=250)
         self.select_time_zero_from_data_var.trace_add("write", self._on_select_time_zero_from_data_toggle_trace)
 
@@ -355,7 +380,9 @@ class ExponentialFittingGUI:
     def toggle_results_panel(self):
         self.results_frame_visible = not self.results_frame_visible
         if self.results_frame_visible:
-            self.results_frame.place(in_=self.plot_frame, relx=1.0, rely=0, relheight=1, anchor='ne', width=self.side_panel_width)
+            # 使用相对尺寸，适应不同屏幕
+            panel_width = min(self.side_panel_width, int(self.plot_frame.winfo_width() * 0.4))
+            self.results_frame.place(in_=self.plot_frame, relx=1.0, rely=0, relheight=1, anchor='ne', width=panel_width)
             self.toggle_button.config(text=">")
         else:
             self.results_frame.place_forget()
@@ -381,11 +408,19 @@ class ExponentialFittingGUI:
         if region == "tree":
             row_id = self.fit_results_tree.identify_row(event.y)
             if row_id:
-                if row_id in self.visible_fit_ids:
-                    self.visible_fit_ids.remove(row_id)
+                # 获取当前温度
+                temp = self.temperatures[self.current_temp_index]
+                
+                # 确保当前温度有对应的可见性集合
+                if temp not in self.visible_fit_ids:
+                    self.visible_fit_ids[temp] = set()
+                    
+                # 切换可见性
+                if row_id in self.visible_fit_ids[temp]:
+                    self.visible_fit_ids[temp].remove(row_id)
                     self.fit_results_tree.item(row_id, tags=('unchecked',))
                 else:
-                    self.visible_fit_ids.add(row_id)
+                    self.visible_fit_ids[temp].add(row_id)
                     self.fit_results_tree.item(row_id, tags=('checked',))
                 self.plot_data(preserve_zoom=True)
 
@@ -404,7 +439,7 @@ class ExponentialFittingGUI:
                 self.data_filename = filename
                 self.data_loaded = True
                 self.fit_results = {}
-                self.visible_fit_ids = set()
+                self.visible_fit_ids = {} # 加载新文件时清空可见性设置
                 self.select_time_zero_from_data_var.set(False)
                 self.file_label.config(text=os.path.basename(filename))
                 self.temp_listbox.delete(0, tk.END)
@@ -442,9 +477,19 @@ class ExponentialFittingGUI:
         temp = self.temperatures[self.current_temp_index]
         results_for_temp = self.fit_results.get(temp, [])
         
-        current_temp_ids = {res['id'] for res in results_for_temp}
-        self.visible_fit_ids.intersection_update(current_temp_ids)
-
+        # 确保当前温度有对应的可见性集合
+        if temp not in self.visible_fit_ids:
+            self.visible_fit_ids[temp] = set()
+        
+        # 将所有新添加的拟合默认设为可见
+        for result in results_for_temp:
+            fit_id = result.get('id')
+            if fit_id:
+                # 检查这个拟合ID是否在可见性集合中
+                # 如果是新ID（之前没见过），则默认设置为可见
+                if not any(fit_id in vis_set for vis_set in self.visible_fit_ids.values()):
+                    self.visible_fit_ids[temp].add(fit_id)
+            
         for result in results_for_temp:
             fit_id = result.get('id')
             if not fit_id: continue
@@ -452,7 +497,7 @@ class ExponentialFittingGUI:
             strategy_name = result.get('strategy_name_used', 'N/A')
             r_squared = result.get('r_squared', 0)
             
-            tag = 'checked' if fit_id in self.visible_fit_ids else 'unchecked'
+            tag = 'checked' if fit_id in self.visible_fit_ids[temp] else 'unchecked'
             
             self.fit_results_tree.insert(
                 '', 'end', iid=fit_id,
@@ -467,7 +512,8 @@ class ExponentialFittingGUI:
         
         self.ax.clear()
         for spine in self.ax.spines.values(): spine.set_color('gray')
-        self.ax.tick_params(axis='x', colors='lightgray'); self.ax.tick_params(axis='y', colors='lightgray')
+        self.ax.tick_params(axis='x', colors='lightgray')
+        self.ax.tick_params(axis='y', colors='lightgray')
 
         if not self.data_loaded:
             self.ax.text(0.5, 0.5, "请先加载数据", ha='center', va='center', transform=self.ax.transAxes, **self.plot_label_font_props)
@@ -487,10 +533,13 @@ class ExponentialFittingGUI:
 
             self.ax.plot(self.times, data_y, 'o', markersize=5, label='原始数据', alpha=0.7, color='#00A0FF')
             
+            # 获取当前温度的可见性设置
+            visible_ids_for_temp = self.visible_fit_ids.get(temp, set())
+            
             results_for_temp = self.fit_results.get(temp, [])
             for i, result in enumerate(results_for_temp):
                 fit_id = result.get('id')
-                if result.get('success') and fit_id in self.visible_fit_ids:
+                if result.get('success') and fit_id in visible_ids_for_temp:
                     strategy = fitting_dispatcher.get_strategy(result['strategy_name_used'])
                     if strategy:
                         # 2. 生成高分辨率的拟合曲线
@@ -541,7 +590,12 @@ class ExponentialFittingGUI:
             self.ax.set_ylabel(f'信号 ({self.signal_unit_label})', **self.plot_label_font_props)
         
         self.ax.grid(True, alpha=0.2, linestyle=':')
-        if preserve_zoom and current_xlim: self.ax.set_xlim(current_xlim); self.ax.set_ylim(current_ylim)
+        # 确保图表在缩放时保持良好布局
+        self.fig.tight_layout()
+        
+        if preserve_zoom and current_xlim: 
+            self.ax.set_xlim(current_xlim)
+            self.ax.set_ylim(current_ylim)
         self._update_legend()
         self.canvas.draw_idle()
 
@@ -624,7 +678,13 @@ class ExponentialFittingGUI:
                 fit_res['id'] = str(uuid.uuid4())
                 temp_val = self.temperatures[self.current_temp_index]
                 self.fit_results.setdefault(temp_val, []).append(fit_res)
-                self.visible_fit_ids.add(fit_res['id'])
+                
+                # 确保当前温度有对应的可见性集合
+                if temp_val not in self.visible_fit_ids:
+                    self.visible_fit_ids[temp_val] = set()
+                # 新拟合默认可见
+                self.visible_fit_ids[temp_val].add(fit_res['id'])
+                
                 self.update_status(f"温度 {temp_val:.1f} K 新增拟合: R²={fit_res['r_squared']:.4f}")
                 self._update_listbox_item(self.current_temp_index)
                 self._update_fit_results_treeview()
@@ -635,7 +695,13 @@ class ExponentialFittingGUI:
             if fit_res and fit_res.get('success'):
                 fit_res['id'] = str(uuid.uuid4())
                 self.fit_results.setdefault(temp_val, []).append(fit_res)
-                self.visible_fit_ids.add(fit_res['id'])
+                
+                # 确保该温度有对应的可见性集合
+                if temp_val not in self.visible_fit_ids:
+                    self.visible_fit_ids[temp_val] = set()
+                # 新拟合默认可见
+                self.visible_fit_ids[temp_val].add(fit_res['id'])
+                
                 temp_idx = np.where(self.temperatures == temp_val)[0][0]
                 self._update_listbox_item(temp_idx)
                 if temp_idx == self.current_temp_index:
@@ -647,7 +713,13 @@ class ExponentialFittingGUI:
                 if fit_res and fit_res.get('success'):
                     fit_res['id'] = str(uuid.uuid4())
                     self.fit_results[temp_val] = [fit_res]
-                    self.visible_fit_ids.add(fit_res['id'])
+                    
+                    # 确保该温度有对应的可见性集合
+                    if temp_val not in self.visible_fit_ids:
+                        self.visible_fit_ids[temp_val] = set()
+                    # 新拟合默认可见
+                    self.visible_fit_ids[temp_val].add(fit_res['id'])
+                    
                     temp_idx = np.where(self.temperatures == temp_val)[0][0]
                     self._update_listbox_item(temp_idx)
             self.update_status(f"批量拟合完成, 更新了 {len(new_fits_by_temp)} 个温度的结果。")
@@ -725,8 +797,8 @@ class ExponentialFittingGUI:
         results_list = self.fit_results.get(temp, [])
         
         self.fit_results[temp] = [fit for fit in results_list if fit.get('id') != selected_id]
-        if selected_id in self.visible_fit_ids:
-            self.visible_fit_ids.remove(selected_id)
+        if selected_id in self.visible_fit_ids.get(temp, set()):
+            self.visible_fit_ids[temp].remove(selected_id)
         
         self._update_listbox_item(self.current_temp_index)
         self._update_fit_results_treeview()
@@ -837,6 +909,53 @@ class ExponentialFittingGUI:
             finally:
                 self.update_status("准备就绪")
     
+    def export_multi_sheet_csv(self):
+        """导出为多Sheet格式的CSV文件，可直接拖入Excel或Origin"""
+        if not any(self.fit_results.values()):
+            messagebox.showwarning("警告", "没有成功的拟合结果可导出。", parent=self.root)
+            return
+
+        fits_to_export = self._prepare_results_for_export()
+        
+        if fits_to_export is None:
+            return
+
+        if not fits_to_export:
+            messagebox.showwarning("警告", "没有成功的拟合结果可导出。", parent=self.root)
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="保存多Sheet格式CSV文件",
+            defaultextension=".csv",
+            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        )
+        if filename:
+            try:
+                self.update_status("正在导出多Sheet格式CSV...")
+                from io_functions import export_multi_sheet_csv  # 引入新的导出函数
+                
+                export_multi_sheet_csv(
+                    filename, 
+                    self.temperatures, 
+                    self.times, 
+                    self.data_matrix, 
+                    fits_to_export, 
+                    fitting_dispatcher,
+                    self.data_filename
+                )
+                
+                self.update_status(f"数据已导出至 {os.path.basename(filename)}")
+                messagebox.showinfo(
+                    "成功", 
+                    f"多Sheet格式CSV已成功保存到:\n{filename}\n\n可直接拖入Excel或Origin查看。", 
+                    parent=self.root
+                )
+            except Exception as e:
+                messagebox.showerror("错误", f"导出多Sheet格式CSV失败: {e}", parent=self.root)
+                traceback.print_exc()
+            finally:
+                self.update_status("准备就绪")
+
     def _gather_application_state(self) -> Dict[str, Any]:
         state = {
             'version': '1.0',
@@ -861,7 +980,18 @@ class ExponentialFittingGUI:
         self.times = state['times']
         self.data_matrix = state['data_matrix']
         self.fit_results = state['fit_results']
-        self.visible_fit_ids = state.get('visible_fit_ids', set())
+        
+        # 确保visible_fit_ids是字典格式
+        if isinstance(state.get('visible_fit_ids'), dict):
+            self.visible_fit_ids = state['visible_fit_ids']
+        else:
+            # 兼容旧版本，将旧格式转换为新格式
+            old_visible_ids = state.get('visible_fit_ids', set())
+            self.visible_fit_ids = {}
+            # 遍历所有温度的拟合结果，将旧的可见性信息应用到相应温度
+            for temp, fits in self.fit_results.items():
+                self.visible_fit_ids[temp] = set(fit['id'] for fit in fits if fit['id'] in old_visible_ids)
+        
         self.current_temp_index = state['current_temp_index']
         
         self.time_zero_var.set(state['time_zero_var'])
@@ -1021,6 +1151,26 @@ class ExponentialFittingGUI:
         
     def show_help(self): messagebox.showinfo("帮助", "使用说明...")
     def show_about(self): messagebox.showinfo("关于", "拟合程序...")
+
+    def run_curve_tool(self):
+        """运行曲线变换观察工具"""
+        try:
+            self.update_status("启动曲线变换观察工具...")
+            curve_main_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "curve", "curve_main.py")
+            
+            if not os.path.exists(curve_main_path):
+                messagebox.showerror("错误", f"找不到曲线工具文件: {curve_main_path}", parent=self.root)
+                return
+                
+            # 使用当前Python解释器运行curve_main.py
+            python_executable = sys.executable
+            subprocess.Popen([python_executable, curve_main_path])
+            
+            self.update_status("曲线变换观察工具已启动")
+        except Exception as e:
+            messagebox.showerror("错误", f"启动曲线工具失败: {str(e)}", parent=self.root)
+            traceback.print_exc()
+            self.update_status("启动失败")
 
     def _update_strategy_dependent_ui(self):
         fit_button_state = tk.NORMAL if self.current_strategy and self.data_loaded else tk.DISABLED

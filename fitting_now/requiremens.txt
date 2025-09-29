@@ -1,0 +1,5 @@
+# Python 3.9.13 环境的推荐依赖库版本
+numpy==1.24.4
+scipy==1.11.4
+pandas==2.0.3
+matplotlib==3.7.5

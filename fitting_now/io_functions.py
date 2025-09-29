@@ -117,7 +117,7 @@ def export_parameters_summary(filename: str, all_temperatures: np.ndarray,
     """
     导出所有拟合的参数概览。
     纵轴是温度，横轴是所有策略中出现过的参数。
-    fit_results_map: 字典，键是温度，值是“单个”最佳或选定的拟合结果。
+    fit_results_map: 字典，键是温度，值是"单个"最佳或选定的拟合结果。
     """
     try:
         output_lines = []
@@ -190,7 +190,7 @@ def export_curves_data(filename: str, temperatures: np.ndarray, times_original: 
     """
     导出原始数据和对应的拟合曲线。
     格式为：原始时间, 原始数据, 拟合时间, 拟合数据, ...
-    fit_results_map: 字典，键是温度，值是“单个”最佳或选定的拟合结果。
+    fit_results_map: 字典，键是温度，值是"单个"最佳或选定的拟合结果。
     """
     try:
         all_series = []
@@ -234,3 +234,119 @@ def export_curves_data(filename: str, temperatures: np.ndarray, times_original: 
     except Exception as e:
         traceback.print_exc()
         raise RuntimeError(f"导出曲线失败: {str(e)}")
+
+def export_multi_sheet_csv(filename: str, temperatures: np.ndarray, times_original: np.ndarray,
+                           data_matrix: np.ndarray, fit_results_map: Dict[float, Dict[str, Any]], dispatcher,
+                           data_filename_original: str):
+    """
+    导出为多Sheet格式的CSV文件，可直接拖入Excel或Origin。
+    每个温度一个Sheet，包含原始数据和拟合曲线，
+    额外添加一个参数汇总Sheet。
+    
+    Args:
+        filename: 输出文件路径
+        temperatures: 温度数组
+        times_original: 时间数组
+        data_matrix: 原始数据矩阵
+        fit_results_map: 拟合结果字典
+        dispatcher: 策略调度器
+        data_filename_original: 原始数据文件名
+    """
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            # 按温度导出每个Sheet
+            for i, temp in enumerate(temperatures):
+                # Sheet标记，Excel和Origin都能识别
+                f.write(f"[{temp:.1f}K]\n")
+                
+                # 表头
+                f.write(f"Time,Raw Data,Fitted Time,Fitted Data\n")
+                
+                # 准备数据
+                result = fit_results_map.get(temp)
+                y_fit = None
+                
+                if result and result.get('success'):
+                    strategy_name = result.get('strategy_name_used')
+                    params = result.get('params')
+                    
+                    if strategy_name and params is not None:
+                        strategy_obj = dispatcher.get_strategy(strategy_name)
+                        if strategy_obj:
+                            try:
+                                y_fit = strategy_obj.model_function(times_original, *params)
+                            except Exception as e_fit:
+                                print(f"Warning: Error generating fit for T={temp}: {e_fit}")
+                
+                # 写入数据行
+                for j, t in enumerate(times_original):
+                    raw_value = data_matrix[j, i]
+                    if y_fit is not None:
+                        fit_value = y_fit[j]
+                        f.write(f"{t:.6e},{raw_value:.6e},{t:.6e},{fit_value:.6e}\n")
+                    else:
+                        f.write(f"{t:.6e},{raw_value:.6e},,\n")
+                
+                # 空行分隔不同Sheet
+                f.write("\n")
+            
+            # 最后添加参数汇总表
+            f.write("[Parameters]\n")
+            f.write(f"# Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Original Data file: {os.path.basename(data_filename_original) if data_filename_original else 'N/A'}\n")
+            
+            # 构建参数表头
+            all_param_names = set()
+            for res in fit_results_map.values():
+                if res and res.get('success'):
+                    strategy = fitting_dispatcher.get_strategy(res['strategy_name_used'])
+                    if strategy:
+                        all_param_names.update(strategy.get_parameter_names())
+            
+            sorted_param_names = sorted(list(all_param_names))
+            
+            # 写入参数表头
+            header_parts = ["Temperature", "Strategy", "R_squared"]
+            for name in sorted_param_names:
+                header_parts.extend([f"{name}_Value", f"{name}_Error"])
+            f.write(",".join(header_parts) + "\n")
+            
+            # 写入每个温度的参数
+            for temp in temperatures:
+                result = fit_results_map.get(temp)
+                
+                row_parts = [f"{temp:.2f}"]
+                
+                if result and result.get('success'):
+                    strategy_name = result.get('strategy_name_used', 'N/A')
+                    row_parts.append(strategy_name)
+                    row_parts.append(f"{result.get('r_squared', np.nan):.6f}")
+
+                    params = result.get('params', [])
+                    errors = result.get('errors', [np.nan] * len(params))
+                    
+                    # 获取当前策略的参数名列表
+                    current_strategy_obj = fitting_dispatcher.get_strategy(strategy_name)
+                    current_param_names = current_strategy_obj.get_parameter_names() if current_strategy_obj else []
+                    
+                    # 创建一个从参数名到值的映射
+                    param_value_map = {name: (params[i], errors[i]) for i, name in enumerate(current_param_names)}
+
+                    # 按全局排序的参数名填充数据
+                    for name in sorted_param_names:
+                        val, err = param_value_map.get(name, (np.nan, np.nan))
+                        row_parts.append(f"{val:.6e}" if np.isfinite(val) else "")
+                        row_parts.append(f"{err:.6e}" if np.isfinite(err) else "")
+
+                else:
+                    # 如果该温度没有拟合数据，用空值填充
+                    num_to_pad = 2 + len(sorted_param_names) * 2  # 策略名+R²+参数值和误差
+                    row_parts.extend([""] * num_to_pad)
+                    
+                f.write(",".join(row_parts) + "\n")
+                
+        return True
+
+    except Exception as e:
+        traceback.print_exc()
+        raise RuntimeError(f"导出多Sheet格式CSV失败: {str(e)}")

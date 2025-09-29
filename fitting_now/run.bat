@@ -1,0 +1,1 @@
+pythonw ./gui_main.py
